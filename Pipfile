@@ -1,0 +1,27 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[[source]]
+url = "https://download.pytorch.org/whl/torch_stable.html"
+verify_ssl = false
+name = "pytorch"
+
+[packages]
+torch = {version = "*", index = "pytorch"}
+
+[dev-packages]
+black = "==20.8b1"
+flake8 = "*"
+isort = "*"
+jupyter = "*"
+myst-nb = "<0.11"
+numpydoc = "*"
+pytest = "*"
+pytest-cov = "*"
+sphinx_rtd_theme = "*"
+tox = "*"
+
+[requires]
+python_version = "3"
