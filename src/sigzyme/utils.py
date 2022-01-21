@@ -10,10 +10,12 @@ def torch_peaks(y, method):
     y2 = torch.where(y2 < 0, y2 * 0 - 1, torch.where(y2 > 0, y2 * 0 + 1, y2))
     if method == "bfill":
         y2 = torch.where(y2 == 0, -y1, y2)
-        first_nonzero = (y2.abs() * torch.arange(y2.shape[-1], 0, -1)).argmax(
+        first_nonzero = (
+            y2.abs() * torch.arange(y2.shape[-1], 0, -1, device=y2.device)
+        ).argmax(-1, keepdim=True)
+        last_nonzero = (y2.abs() * torch.arange(y2.shape[-1], device=y2.device)).argmax(
             -1, keepdim=True
         )
-        last_nonzero = (y2.abs() * torch.arange(y2.shape[-1])).argmax(-1, keepdim=True)
         y2_without_first_nonzero = y2.scatter(-1, first_nonzero, 0)
         y2_without_last_nonzero = y2.scatter(-1, last_nonzero, 0)
         ind = torch.where(y2_without_last_nonzero != 0)
@@ -21,10 +23,12 @@ def torch_peaks(y, method):
         y1[indp1] = -y2[ind]
     elif method == "ffill":
         y1 = torch.where(y1 == 0, -y2, y1)
-        first_nonzero = (y1.abs() * torch.arange(y1.shape[-1], 0, -1)).argmax(
+        first_nonzero = (
+            y1.abs() * torch.arange(y1.shape[-1], 0, -1, device=y1.device)
+        ).argmax(-1, keepdim=True)
+        last_nonzero = (y1.abs() * torch.arange(y1.shape[-1], device=y1.device)).argmax(
             -1, keepdim=True
         )
-        last_nonzero = (y1.abs() * torch.arange(y1.shape[-1])).argmax(-1, keepdim=True)
         y1_without_first_nonzero = y1.scatter(-1, first_nonzero, 0)
         y1_without_last_nonzero = y1.scatter(-1, last_nonzero, 0)
         ind = torch.where(y1_without_last_nonzero != 0)
@@ -101,7 +105,7 @@ def torch_hermite(x, y, xs):
         replacement = torch.take_along_dim(m, last_nonzero - 1, dim=-1)
         m = torch.where(torch.isnan(m), replacement, m)
         m = torch.cat(
-            [m[..., [0]], (m[..., 1:] + m[..., :-1]) / 2, m[..., [-1]]], axis=1
+            [m[..., [0]], (m[..., 1:] + m[..., :-1]) / 2, m[..., [-1]]], axis=-1
         )
         idxs = torch.searchsorted(x, xs) - 1
         idxs.clamp_(min=0, max=nf - 2)
@@ -136,28 +140,41 @@ def torch_akima(x, y, xs):
     if nf == 3:
         return torch_hermite(x, y, xs)
     delta = x[..., 1:] - x[..., :-1]
-    last_nonzero = (-delta).signbit().cumsum(-1)[..., [-1]].clamp(min=1)
     m = (y[..., 1:] - y[..., :-1]) / delta
-    replacement = torch.take_along_dim(m, last_nonzero - 1, dim=-1)
-    m = torch.where(torch.isnan(m), replacement, m)
     if nf == 2:
         return m * (xs - x[..., [0]]) + y[..., [0]]
     else:
         mm = 2.0 * m[..., [0]] - m[..., [1]]
         mmm = 2.0 * mm - m[..., [0]]
-        mp = 2.0 * m[..., [-2]] - m[..., [-3]]
-        mpp = 2.0 * mp - m[..., [-2]]
+        mp = 2.0 * m[..., [-1]] - m[..., [-2]]
+        mpp = 2.0 * mp - m[..., [-1]]
         m = torch.cat([mmm, mm, m, mp, mpp], axis=-1)
-        dm = torch.abs(m[..., 1:] - m[..., :-1])
-        f1 = dm[..., 2:]
-        f2 = dm[..., :-2]
+        m1 = m[..., 1:].clone().detach()
+        m2 = m[..., :-1].clone().detach()
+        dm = torch.abs(m1 - m2)
+        f1 = dm[..., 2:].clone().detach()
+        f2 = dm[..., :-2].clone().detach()
+        # accounts for repeated points (delta == 0)
+        ind1 = torch.where(torch.isnan(m1) & (~torch.isnan(m2)))
+        ind2 = torch.where(torch.isnan(m2) & (~torch.isnan(m1)))
+        m1[ind1] = m2[ind2[:-1] + (ind2[-1] + 1,)]
+        m2[ind2] = m1[ind1[:-1] + (ind1[-1] - 1,)]
+
+        f1[ind1[:-1] + (ind1[-1] - 2,)] = torch.abs(m1[..., 1:] - m1[..., :-1])[
+            ind1[:-1] + (ind1[-1] - 1,)
+        ]
+        f2[ind2] = torch.abs(m2[..., 1:] - m2[..., :-1])[ind2]
+        f1[ind1[:-1] + (ind1[-1] - 1,)] = f2[ind2[:-1] + (ind2[-1] + 1,)]
+        f2[ind2[:-1] + (ind2[-1] - 1,)] = f1[ind1[:-1] + (ind1[-1] - 3,)]
+        # determines piecewise polynomial coefficients b, c, and d
         f12 = f1 + f2
+        f12 = torch.where(torch.isnan(f12), torch.zeros_like(f12), f12)
         ind = torch.nonzero(f12 > 1e-9 * f12.max(), as_tuple=True)
         batch_ind, x_ind = ind[:-1], ind[-1]
         b = m[..., 1:-1].clone().detach()
         b[ind] = (
-            f1[ind] * m[batch_ind + (x_ind + 1,)]
-            + f2[ind] * m[batch_ind + (x_ind + 2,)]
+            f1[ind] * m2[batch_ind + (x_ind + 1,)]
+            + f2[ind] * m1[batch_ind + (x_ind + 1,)]
         ) / f12[ind]
         c = (3.0 * m[..., 2:-2] - 2.0 * b[..., :-2] - b[..., 1:-1]) / delta
         d = (b[..., :-2] + b[..., 1:-1] - 2.0 * m[..., 2:-2]) / delta ** 2
