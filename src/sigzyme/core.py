@@ -1,42 +1,71 @@
+import warnings
+
 import torch
-from .utils import torch_peaks
+
+from .utils import torch_akima, torch_peaks
 
 
 class TorchEMD(object):
     def __init__(
         self,
         max_iter=2000,
+        pad_width=2,
         theta_1=0.05,
         theta_2=0.50,
         alpha=0.05,
         spline=torch_akima,
     ):
         self.max_iter = max_iter
+        self.pad_width = pad_width
         self.theta_1 = theta_1
         self.theta_2 = theta_2
         self.alpha = alpha
         self.spline = spline
 
-    def get_envelope(self, batch, cols, y, yy):
-        # remove peaks on the edges of the original signals
-        mask = cols % (self.size - 1) > 0
-        batch = batch[mask]
-        cols = cols[mask]
-        # use linear indices to calculate n_peaks
+    def get_envelope(self, batch, cols, y):
+        # use linear indices to calculate n_ext
         ravel = (batch * self.coefs).sum(dim=-1)
         n_ext = torch.bincount(ravel, minlength=self.n_signals).reshape(
             self.batch_shape
         )
-        # fancy indexing by repeating the last elements of the batches with fewer peaks
-        index = torch.zeros(n_ext.shape + (n_ext.max() + 1,), dtype=int)
+        # fancy indexing by repeating the last elements of the batches with fewer extrema
+        index = torch.zeros(
+            n_ext.shape + (n_ext.max() + 1,), dtype=int, device=self.device
+        )
         index.scatter_(-1, n_ext.view(*self.shape), 1)
         index = index[..., 1:].flip(dims=(-1,)).cumsum(-1).flip(dims=(-1,))
         index = index.view(-1).cumsum(0).view(n_ext.shape + (n_ext.max(),))
-        # the original signal is repeated 3 times, determine actual number of peaks
-        n_ext.div_(3, rounding_mode="floor")
-        # use the fancy indexing to get peaks for each batch
-        t_ext = self.tt[cols[index - 1]]
-        y_ext = torch.take_along_dim(yy, cols[index - 1], dim=-1)
+        # use the fancy indexing to get extrema for each batch
+        t_ext = self.time[cols[index - 1]]
+        y_ext = torch.take_along_dim(y, cols[index - 1], dim=-1)
+        # catch monotonicity
+        if t_ext.shape[-1] < 1:
+            return n_ext, y
+        # pad extrema before interpolating to counter edge effects
+        t_left = torch.arange(self.pad_width, device=self.device).expand(
+            *self.batch_shape, -1
+        )
+        t_left = torch.clamp_max(t_left, t_ext.shape[-1] - 1)
+        t_left = torch.take_along_dim(t_ext, t_left, dim=-1).fliplr()
+        t_left = 2 * self.time[0] - t_left
+        t_right = n_ext.view(*self.shape) - torch.arange(
+            1, self.pad_width + 1, device=self.device
+        )
+        t_right = torch.clamp_min(t_right, 0)
+        t_right = torch.take_along_dim(t_ext, t_right, dim=-1)
+        t_right = 2 * self.time[-1] - t_right
+        t_ext = torch.cat([t_left, t_ext, t_right], axis=-1)
+        y_left = torch.arange(self.pad_width, device=self.device).expand(
+            *self.batch_shape, -1
+        )
+        y_left = torch.clamp_max(y_left, y_ext.shape[-1] - 1)
+        y_left = torch.take_along_dim(y_ext, y_left, dim=-1).fliplr()
+        y_right = n_ext.view(*self.shape) - torch.arange(
+            1, self.pad_width + 1, device=self.device
+        )
+        y_right = torch.clamp_min(y_right, 0)
+        y_right = torch.take_along_dim(y_ext, y_right, dim=-1)
+        y_ext = torch.cat([y_left, y_ext, y_right], axis=-1)
         env = self.spline(t_ext, y_ext, self.t_interp)
         # replace interpolation of monotonic residues with the original signal
         env = torch.where(torch.isnan(env), y, env)
@@ -54,39 +83,22 @@ class TorchEMD(object):
         is_imf: Tensor (...,)
         is_monotonic: Tensor (...,)
         """
-        yy = torch.cat(
-            [y[..., 1:].flip(-1), y, y[..., :-1].flip(-1)],
-            axis=-1,
-        )
-        peak_batch, peak_cols_f = torch_peaks(yy, "ffill")
-        peak_batch, peak_cols_b = torch_peaks(yy, "bfill")
+        # upper envelope
+        peak_batch, peak_cols_f = torch_peaks(y, "ffill")
+        peak_batch, peak_cols_b = torch_peaks(y, "bfill")
         peak_cols = (peak_cols_b + peak_cols_f).div(2, rounding_mode="floor")
-        n_peaks, upper = self.get_envelope(peak_batch, peak_cols, y, yy)
-        dip_batch, dip_cols_f = torch_peaks(-yy, "ffill")
-        dip_batch, dip_cols_b = torch_peaks(-yy, "bfill")
+        n_peaks, upper = self.get_envelope(peak_batch, peak_cols, y)
+        # lower envelope
+        dip_batch, dip_cols_f = torch_peaks(-y, "ffill")
+        dip_batch, dip_cols_b = torch_peaks(-y, "bfill")
         dip_cols = (dip_cols_b + dip_cols_f).div(2, rounding_mode="floor")
-        n_dips, lower = self.get_envelope(dip_batch, dip_cols, y, yy)
+        n_dips, lower = self.get_envelope(dip_batch, dip_cols, y)
         # find zero crossings
-        n_zero = torch.count_nonzero(torch.diff(torch.signbit(yy)), axis=-1)
-        n_zero.div_(3, rounding_mode="floor")
+        n_zero = torch.count_nonzero(torch.diff(torch.signbit(y)), axis=-1)
         is_monotonic = (n_peaks < 2) | (n_dips < 2)
         mu = (upper + lower) / 2
         amp = (upper - lower) / 2
         sigma = torch.abs(mu / amp)
-
-        print(
-            torch.vstack(
-                [
-                    n_peaks,
-                    n_dips,
-                    n_zero,
-                    torch.abs(n_peaks + n_dips - n_zero),
-                    (sigma > self.theta_1).sum(-1),
-                    (sigma > self.theta_2).sum(-1),
-                ]
-            )
-        )
-
         # stoppig criteria
         is_imf = (sigma > self.theta_1).sum(axis=-1) < (self.alpha * self.size)
         is_imf &= (sigma < self.theta_2).all(axis=-1)
@@ -113,7 +125,6 @@ class TorchEMD(object):
             if (is_monotonic | is_imf).all():
                 break
             mode[~is_imf] = mode[~is_imf] - mu[~is_imf]
-            # mode[is_monotonic] = 0.0
         return mode, is_monotonic
 
     def fit(self, t, X):
@@ -127,14 +138,8 @@ class TorchEMD(object):
             )
         self.time = t
         self.size = size
-        self.tt = torch.cat(
-            [
-                2 * self.time[0] - self.time[1:].flip(-1),
-                self.time,
-                2 * self.time[-1] - self.time[:-1].flip(-1),
-            ]
-        )
         self.device = X.device
+        return self
 
     def transform(self, X, max_modes=None):
         if X.shape[-1] != self.size:
@@ -157,9 +162,15 @@ class TorchEMD(object):
             mode, is_monotonic = self.iter(residue)
             if is_monotonic.all():
                 break
+            if len(imfs) > torch.log2(torch.tensor(self.size)):
+                warnings.warn(
+                    "Stopping criteria n_modes > log2(n_samples) has been reached before"
+                    " convergence. If you're using float32, you may want to use float64."
+                )
+                break
             imfs.append(mode)
             residue = residue - mode
-        # Defines useful attributes
+        # define useful attributes
         self.modes = imfs
         self.residue = residue
         self.n_modes = len(imfs)
@@ -254,24 +265,36 @@ class TorchSSA(object):
     def __init__(self, L):
         self.L = L
 
-    def __call__(self, t, x, max_components=None, min_sigma=0):
-        N = t.size(0)
-        K = N - self.L + 1
+    def fit(self, t):
+        self.N = t.size(0)
+        self.K = N - self.L + 1
+        rangeL = torch.arange(self.L, device=x.device)
+        self.ids = torch.arange(self.K, device=x.device).expand(self.L, self.K)
+        self.ids = self.ids + rangeL.view(-1, 1)
+        self.x_ids = torch.repeat_interleave(rangeL, self.K)
+        self.y_ids = self.ids.flipud().flatten()
+        return self
+
+    def transform(x, max_components=None, min_sigma=0, save_memory=True):
         if max_components is None:
             max_components = self.L
-        rangeL = torch.arange(self.L, device=x.device)
-        ids = torch.arange(K, device=x.device).expand(self.L, K)
-        ids = ids + rangeL.view(-1, 1)
-        X = x[ids]
+        X = x[self.ids]
         U, S, VT = torch.linalg.svd(X, full_matrices=False)
         self.sigma = S
         d = torch.where(S / S[0] > min_sigma)[0][-1] + 1
         d = min(d, max_components)
         X_elem = torch.full((self.L, N), torch.nan, device=x.device)
-        x_ids = torch.repeat_interleave(rangeL, K)
-        y_ids = ids.flipud().flatten()
-        results = torch.empty((d, N), device=x.device)
-        for i in range(d):
-            X_elem[x_ids, y_ids] = (S[i] * U[:, i].outer(VT[i, :])).flipud().flatten()
-            results[i] = torch.nanmean(X_elem, 0)
+        if save_memory:
+            results = torch.empty((d, N), device=x.device)
+            for i in range(d):
+                X_elem[x_ids, y_ids] = (
+                    (S[i] * U[:, i].outer(VT[i, :])).flipud().flatten()
+                )
+                results[i] = torch.nanmean(X_elem, 0)
+        else:
+            pass
         return results
+
+    def __call__(self, t, x, max_components=None, min_sigma=0):
+        self.fit(t)
+        return self.transform(x, max_components=None, min_sigma=0)
