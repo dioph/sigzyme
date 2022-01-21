@@ -27,8 +27,10 @@ extras_require = {
         "black==20.8b1",
         "flake8",
         "isort",
+        "numpy",
         "pytest",
         "pytest-cov",
+        "scipy>0.14",
         "tox",
     ],
 }
