@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from sigzyme.core import TorchEMD
@@ -36,15 +37,15 @@ def test_emd_max_modes():
     )
     assert nsr_02 < 0.02
 
+
 def test_emd_gpu():
     if not torch.cuda.is_available():
         pytest.skip("skipping CUDA tests")
     t = torch.linspace(0, 10, 1024).to(float)
-    t0 = t.to('cuda')
+    t0 = t.to("cuda")
     X = torch.atleast_2d(torch.randn(t.shape)).to(float)
-    X0 = X.to('cuda')
+    X0 = X.to("cuda")
     emd = TorchEMD()
     cpu_modes = torch.vstack(emd(t, X))
     gpu_modes = torch.vstack(emd(t0, X0))
     assert torch.allclose(gpu_modes.cpu(), cpu_modes)
-    

@@ -13,6 +13,7 @@ def test_akima_scipy():
     true_y0 = interpolate.Akima1DInterpolator(t, y)(t0)
     assert np.allclose(y0, true_y0)
 
+
 def test_hermite_scipy():
     t = torch.arange(5).to(float)
     y = torch.tensor([3, 2, 3, 4, 3]).to(float)
