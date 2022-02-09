@@ -50,46 +50,48 @@ def torch_cubic(x, y, xs):
         return torch.zeros_like(xs, dtype=y.dtype, device=y.device)
     if nf == 1:
         return torch.ones_like(xs, dtype=y.dtype, device=y.device) * y[..., [0]]
+    delta = x[..., 1:] - x[..., :-1]
+    last_nonzero = (-delta).signbit().cumsum(-1)[..., [-1]].clamp(min=1)
+    dy = y[..., 1:] - y[..., :-1]
+    m = dy / delta
     if nf == 2:
-        a = y[..., :1]
-        b = (y[..., 1:] - y[..., :1]) / (x[..., 1:] - x[..., :1])
-        c = torch.zeros(*y.shape[:-1], 1, dtype=y.dtype, device=y.device)
-        d = torch.zeros(*y.shape[:-1], 1, dtype=y.dtype, device=y.device)
+        return m * (xs - x[..., [0]]) + y[..., [0]]
     else:
-        dx = x[1:] - x[:-1]
-        inv_dx = dx.reciprocal()
+        inv_dx = delta.reciprocal()
         inv_dx2 = inv_dx ** 2
-        dy = y[..., 1:] - y[..., :-1]
         dy_scaled = 3 * dy * inv_dx2
-        D = torch.empty(nf, dtype=y.dtype, device=y.device)
-        D[:-1] = inv_dx
-        D[-1] = 0
-        D[1:] += inv_dx
+        # solve the tridiagonal system
+        D = torch.empty_like(y)
+        D[..., :-1] = inv_dx
+        D.scatter_(-1, last_nonzero, 0)
+        D[..., 1:] += inv_dx
         D *= 2
         f = torch.empty_like(y)
         f[..., :-1] = dy_scaled
-        f[..., -1] = 0
+        f.scatter_(-1, last_nonzero, 0)
         f[..., 1:] += dy_scaled
-        U = inv_dx.clone().detach()
-        L = inv_dx.clone().detach()
+        U = torch.where(torch.isfinite(inv_dx), inv_dx, delta)
+        L = torch.where(torch.isfinite(inv_dx), inv_dx, delta)
         for i in range(1, nf):
-            w = L[i - 1] / D[i - 1]
-            D[i] = D[i] - w * U[i - 1]
-            f[i] = f[i] - w * f[i - 1]
+            w = L[..., i - 1] / D[..., i - 1]
+            D[..., i] = D[..., i] - w * U[..., i - 1]
+            f[..., i] = f[..., i] - w * f[..., i - 1]
         out = f / D
         for i in range(nf - 2, -1, -1):
-            out[i] = (f[i] - U[i] * out[i + 1]) / D[i]
-        a = y[..., :-1]
+            temp = (f[..., i] - U[..., i] * out[..., i + 1]) / D[..., i]
+            out[..., i] = torch.nan_to_num(temp)
         b = out[..., :-1]
         c = (3 * dy * inv_dx - 2 * out[..., :-1] - out[..., 1:]) * inv_dx
         d = (-2 * dy * inv_dx + out[..., :-1] + out[..., 1:]) * inv_dx2
-    maxlen = b.size(-1) - 1
-    index = torch.bucketize(xs.detach(), x) - 1
-    index = index.clamp(0, maxlen)
-    t = xs - x[index]
-    inner = c[..., index] + d[..., index] * t
-    inner = b[..., index] + inner * t
-    return a[..., index] + inner * t
+        idxs = torch.searchsorted(x, xs) - 1
+        idxs.clamp_(min=0 * last_nonzero, max=last_nonzero - 1)
+        xi = torch.take_along_dim(x, idxs, dim=-1)
+        yi = torch.take_along_dim(y, idxs, dim=-1)
+        di = torch.take_along_dim(d, idxs, dim=-1)
+        ci = torch.take_along_dim(c, idxs, dim=-1)
+        bi = torch.take_along_dim(b, idxs, dim=-1)
+        t = xs - xi
+        return ((t * di + ci) * t + bi) * t + yi
 
 
 def torch_hermite(x, y, xs):
