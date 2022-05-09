@@ -2,7 +2,7 @@ import warnings
 
 import torch
 
-from .utils import torch_akima, torch_peaks
+from .utils import torch_not_a_knot, torch_peaks
 
 
 class TorchEMD(object):
@@ -13,7 +13,7 @@ class TorchEMD(object):
         theta_1=0.05,
         theta_2=0.50,
         alpha=0.05,
-        spline=torch_akima,
+        spline=torch_not_a_knot,
     ):
         self.max_iter = max_iter
         self.pad_width = pad_width
@@ -68,7 +68,7 @@ class TorchEMD(object):
         y_ext = torch.cat([y_left, y_ext, y_right], axis=-1)
         env = self.spline(t_ext, y_ext, self.t_interp)
         # replace interpolation of monotonic residues with the original signal
-        env = torch.where(torch.isnan(env), y, env)
+        # env = torch.where(torch.isnan(env), y, env)
         return n_ext, env
 
     def sift(self, y):
@@ -99,7 +99,7 @@ class TorchEMD(object):
         mu = (upper + lower) / 2
         amp = (upper - lower) / 2
         sigma = torch.abs(mu / amp)
-        # stoppig criteria
+        # stopping criteria
         is_imf = (sigma > self.theta_1).sum(axis=-1) < (self.alpha * self.size)
         is_imf &= (sigma < self.theta_2).all(axis=-1)
         is_imf &= torch.abs(n_peaks + n_dips - n_zero) <= 1
@@ -121,8 +121,10 @@ class TorchEMD(object):
             if it == 0:
                 mu, is_imf, is_monotonic = self.sift(mode)
             else:
-                mu, is_imf, _ = self.sift(mode)
+                mu, is_imf, tmp = self.sift(mode)
+                is_monotonic = (is_monotonic | tmp)
             if (is_monotonic | is_imf).all():
+                print(it)
                 break
             mode[~is_imf] = mode[~is_imf] - mu[~is_imf]
         return mode, is_monotonic
@@ -151,17 +153,19 @@ class TorchEMD(object):
         self.shape = torch.tensor(self.batch_shape + [1], dtype=int, device=self.device)
         self.n_signals = self.shape.prod()
         self.coefs = self.shape[1:].flipud().cumprod(dim=0).flipud()
-        # t_interp must have same batches as t_peaks for the searchsorted step
-        self.t_interp = self.time.expand(X.shape)
+        # t_interp must have same batches as t_ext for the searchsorted step
+        self.t_interp = self.time.expand(X.shape).contiguous()
         if max_modes is None:
             max_modes = torch.inf
         imfs = []
         is_monotonic = torch.zeros(self.batch_shape, dtype=bool)
         residue = X.clone().detach()
         while not is_monotonic.all() and len(imfs) < max_modes:
+            print("k =", len(imfs))
             mode, is_monotonic = self.iter(residue)
             if is_monotonic.all():
                 break
+            mode[is_monotonic] = 0.0
             if len(imfs) > torch.log2(torch.tensor(self.size)):
                 warnings.warn(
                     "Stopping criteria n_modes > log2(n_samples) has been reached before"
