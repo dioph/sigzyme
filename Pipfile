@@ -10,6 +10,7 @@ name = "pytorch"
 
 [packages]
 torch = {version = "*", index = "pytorch"}
+numba = "*"
 
 [dev-packages]
 black = "==20.8b1"
