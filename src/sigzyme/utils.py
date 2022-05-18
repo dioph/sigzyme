@@ -62,7 +62,7 @@ def torch_peaks(y, method):
         float64[:, :],
         float64[:, :],
     ),
-    cache=False,
+    cache=True,
 )
 def thomas(U, D, L, f, b, cb, db):
     """
@@ -175,7 +175,7 @@ def torch_not_a_knot(x, y, xs):
     return _torch_cubic(x, y, xs, bc_type="not-a-knot")
 
 
-def _torch_cubic(x, y, xs, bc_type="not-a-knot"):
+def _torch_cubic(x, y, xs, bc_type):
     *batch_shape, nf = torch.atleast_2d(y).shape
     if nf == 0:
         return torch.zeros_like(xs, dtype=y.dtype, device=y.device)
@@ -315,21 +315,39 @@ def torch_hermite(x, y, xs):
     nf = y.size(-1)
     if nf == 0:
         return torch.zeros_like(xs, dtype=y.dtype, device=y.device)
-    if nf == 1:
+    elif nf == 1:
         return torch.ones_like(xs, dtype=y.dtype, device=y.device) * y[..., [0]]
-    else:
+    elif nf == 2:
         delta = x[..., 1:] - x[..., :-1]
-        last_nonzero = (-delta).signbit().cumsum(-1)[..., [-1]].clamp(min=1)
-        m = (y[..., 1:] - y[..., :-1]) / delta
-        replacement = torch.take_along_dim(m, last_nonzero - 1, dim=-1)
-        m = torch.where(torch.isnan(m), replacement, m)
-        m = torch.cat(
-            [m[..., [0]], (m[..., 1:] + m[..., :-1]) / 2, m[..., [-1]]], axis=-1
-        )
+        dy = y[..., 1:] - y[..., :-1]
+        return (xs - x[..., [0]]) * dy / delta + y[..., [0]]
+    else:
+        # second-order gradient estimate
+        delta = x[..., 1:] - x[..., :-1]
+        dy = y[..., 1:] - y[..., :-1]
+        delta1 = delta[..., 1:].clone().detach()
+        delta2 = delta[..., :-1].clone().detach()
+        ind1 = torch.where(torch.isfinite(1 / delta1) & (~torch.isfinite(1 / delta2)))
+        ind2 = torch.where(torch.isfinite(1 / delta2) & (~torch.isfinite(1 / delta1)))
+        delta2[ind1] = delta2[ind2]
+        y1 = y[..., 1:].clone().detach()
+        y2 = y[..., :-1].clone().detach()
+        y2[ind1] = y2[ind2]
+        dd = delta1 + delta2
+        m1 = (y1[..., 1:] * delta2 / dd - y1[..., :-1]) / delta1
+        m2 = (y2[..., :-1] * delta1 / dd - y1[..., :-1]) / delta2
+        m = torch.zeros_like(y)
+        m[..., 1:-1] = m1 - m2
+        m[..., 0] = dy[..., 0] / delta[..., 0]
+        m[..., -1] = dy[..., -1] / delta[..., -1]
+        batch_ind1, x_ind1 = ind1[:-1], ind1[-1]
+        batch_ind2, x_ind2 = ind2[:-1], ind2[-1]
+        m[batch_ind2 + (x_ind2 + 1,)] = m[batch_ind1 + (x_ind1 + 1,)]
+        # calculate coefficients
         idxs = torch.searchsorted(x, xs) - 1
         idxs.clamp_(min=0, max=nf - 2)
         xi = torch.take_along_dim(x, idxs, dim=-1)
-        dx = torch.take_along_dim(x, idxs + 1, dim=-1) - xi
+        dx = torch.take_along_dim(delta, idxs, dim=-1)
         t = (xs - xi) / dx
         tt = t[..., None, :] ** torch.arange(4, device=t.device)[:, None]
         A = torch.tensor(
@@ -342,27 +360,22 @@ def torch_hermite(x, y, xs):
         mi = torch.take_along_dim(m, idxs, dim=-1)
         yi1 = torch.take_along_dim(y, idxs + 1, dim=-1)
         mi1 = torch.take_along_dim(m, idxs + 1, dim=-1)
-        return (
+        ys = (
             hh[..., 0, :] * yi
             + hh[..., 1, :] * mi * dx
             + hh[..., 2, :] * yi1
             + hh[..., 3, :] * mi1 * dx
         )
+        return ys
 
 
 def torch_akima(x, y, xs):
     nf = y.size(-1)
-    if nf == 0:
-        return torch.zeros_like(xs, dtype=y.dtype, device=y.device)
-    if nf == 1:
-        return torch.ones_like(xs, dtype=y.dtype, device=y.device) * y[..., [0]]
-    if nf == 3:
+    if nf <= 3:
         return torch_hermite(x, y, xs)
-    delta = x[..., 1:] - x[..., :-1]
-    m = (y[..., 1:] - y[..., :-1]) / delta
-    if nf == 2:
-        return m * (xs - x[..., [0]]) + y[..., [0]]
     else:
+        delta = x[..., 1:] - x[..., :-1]
+        m = (y[..., 1:] - y[..., :-1]) / delta
         mm = 2.0 * m[..., [0]] - m[..., [1]]
         mmm = 2.0 * mm - m[..., [0]]
         mp = 2.0 * m[..., [-1]] - m[..., [-2]]
