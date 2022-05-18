@@ -122,7 +122,7 @@ class TorchEMD(object):
                 mu, is_imf, is_monotonic = self.sift(mode)
             else:
                 mu, is_imf, tmp = self.sift(mode)
-                is_monotonic = (is_monotonic | tmp)
+                is_monotonic = is_monotonic | tmp
             if (is_monotonic | is_imf).all():
                 print(it)
                 break
@@ -175,9 +175,12 @@ class TorchEMD(object):
             imfs.append(mode)
             residue = residue - mode
         # define useful attributes
-        self.modes = imfs
-        self.residue = residue
         self.n_modes = len(imfs)
+        if self.n_modes > 0:
+            self.modes = torch.stack(imfs)
+        else:
+            self.modes = []
+        self.residue = residue
         return self.modes
 
     def __call__(self, t, X, max_modes=None):
@@ -201,19 +204,21 @@ class TorchCEEMDAN(object):
             torch.manual_seed(random_seed)
         self.emd = TorchEMD(**emd_kwargs)
 
-    def _realization(self, noise_modes, k, residue):
-        noisy_residue = residue.copy()
+    def iter(self, noise_modes, k, residue):
+        noisy_residue = residue[None, ..., :]
         if len(noise_modes) > k:
-            beta = self.epsilon * np.std(residue)
+            noise_mode = noise_modes[k][..., None, :]
+            beta = self.epsilon * residue.std(-1, keepdim=True)
             if k == 0:
-                beta /= np.std(noise_modes[k])
-            noisy_residue = noisy_residue + beta * noise_modes[k]
+                beta = beta / noise_mode.std(-1, keepdim=True)
+            noisy_residue = noisy_residue + beta * noise_mode
         try:
-            mode = self.emd(noisy_residue, max_modes=1)[0]
+            mode = self.emd(self.time, noisy_residue, max_modes=1)[0]
         except IndexError:
             # in case noisy_residue happens to be monotonic even though residue was not
-            mode = noisy_residue.copy()
-        return noisy_residue - mode
+            mode = noisy_residue.clone().detach()
+        mu = (noisy_residue - mode).mean(0)
+        return residue - mu
 
     def __call__(self, t, X, max_modes=None):
         size = X.shape[-1]
@@ -229,39 +234,39 @@ class TorchCEEMDAN(object):
         self.device = X.device
         if max_modes is None:
             max_modes = torch.inf
-        sigma_x = X.std(-1)
-        white_noise = torch.randn((self.ensemble_size, self.size), dtype=X.dtype)
-        white_noise_modes = self.emd(white_noise)
-
+        sigma_x = X.std(-1, keepdim=True)
+        white_noise = torch.randn(
+            (self.ensemble_size, self.size), dtype=X.dtype, device=self.device
+        )
+        white_noise_modes = self.emd(t, white_noise)
+        print("White noise: done")
         imfs = []
         residue = X / sigma_x
         while len(imfs) < max_modes:
             k = len(imfs)
-
             # Averages the ensemble of trials for the next mode
-            mu = 0
-            tasks = [(noise_modes, k, residue) for noise_modes in white_noise_modes]
-            mus = pool.map(self._realization, tasks)
-            mu = sum(mus) / self.ensemble_size
-            imfs.append(residue - mu)
-            residue = mu.copy()
-
+            mode = self.iter(white_noise_modes, k, residue)
+            imfs.append(mode)
+            print(f"Mode #{k+1}: done")
+            residue = residue - mode
             # Checks stopping criteria (if the residue is an IMF or too small)
-            if np.var(residue) < self.min_energy:
+            is_small = residue.var(-1, keepdim=True) < self.min_energy
+            if is_small.all():
                 break
-            residue_imfs = self.emd(residue)
+            residue_imfs = self.emd(self.time, residue, max_modes=2)
             if len(residue_imfs) <= 1:
                 if len(imfs) < max_modes and len(residue_imfs) == 1:
                     imfs.append(residue)
                 break
-
         # Undoes the initial normalization
         for i in range(len(imfs)):
             imfs[i] *= sigma_x
-        self.signal = signal
-        self.modes = imfs
-        self.residue = signal - sum(imfs)
         self.n_modes = len(imfs)
+        if self.n_modes > 0:
+            self.modes = torch.stack(imfs)
+        else:
+            self.modes = []
+        self.residue = residue
         return self.modes
 
 
