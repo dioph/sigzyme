@@ -110,61 +110,63 @@ def thomas(U, D, L, f, b, cb, db):
                 db[j, i] = zero
 
 
-@cuda.jit(
-    (
-        float64[:, :],
-        float64[:, :],
-        float64[:, :],
-        float64[:, :],
-        float64[:, :],
-        float64[:, :],
-        float64[:, :],
+if cuda.is_available():
+
+    @cuda.jit(
+        (
+            float64[:, :],
+            float64[:, :],
+            float64[:, :],
+            float64[:, :],
+            float64[:, :],
+            float64[:, :],
+            float64[:, :],
+        )
     )
-)
-def cu_thomas(U, D, L, f, b, cb, db):
-    """
-    U: (M, N - 1)
-    D: (M, N)
-    L: (M, N - 1)
-    f: (M, N)
-    b: (M, N)
-    """
-    M, N = b.shape
-    pos = cuda.grid(1)
-    tx = cuda.gridsize(1)
-    zero = float64(0.0)
-    for j in range(pos, M, tx):
-        dD = zero
-        df = zero
-        for i in range(N):
-            if D[j, i] != zero:
-                D[j, i] = D[j, i] - dD
-                f[j, i] = f[j, i] - df
-                if i < N - 1:
-                    dD = L[j, i] * U[j, i] / D[j, i]
-                    df = L[j, i] * f[j, i] / D[j, i]
-        good = 0
-        if D[j, -1] != zero:
-            b[j, -1] = f[j, -1] / D[j, -1]
-            good += 1
-        else:
-            b[j, -1] = zero
-        w = b[j, -1]
-        for i in range(N - 2, -1, -1):
-            if D[j, i] != zero:
+    def cu_thomas(U, D, L, f, b, cb, db):
+        """
+        U: (M, N - 1)
+        D: (M, N)
+        L: (M, N - 1)
+        f: (M, N)
+        b: (M, N)
+        """
+        M, N = b.shape
+        pos = cuda.grid(1)
+        tx = cuda.gridsize(1)
+        zero = float64(0.0)
+        for j in range(pos, M, tx):
+            dD = zero
+            df = zero
+            for i in range(N):
+                if D[j, i] != zero:
+                    D[j, i] = D[j, i] - dD
+                    f[j, i] = f[j, i] - df
+                    if i < N - 1:
+                        dD = L[j, i] * U[j, i] / D[j, i]
+                        df = L[j, i] * f[j, i] / D[j, i]
+            good = 0
+            if D[j, -1] != zero:
+                b[j, -1] = f[j, -1] / D[j, -1]
                 good += 1
-                b[j, i] = (f[j, i] - U[j, i] * w) / D[j, i]
-                if good > 1:
-                    cb[j, i] = w + b[j, i] + b[j, i]
-                    db[j, i] = w + b[j, i]
+            else:
+                b[j, -1] = zero
+            w = b[j, -1]
+            for i in range(N - 2, -1, -1):
+                if D[j, i] != zero:
+                    good += 1
+                    b[j, i] = (f[j, i] - U[j, i] * w) / D[j, i]
+                    if good > 1:
+                        cb[j, i] = w + b[j, i] + b[j, i]
+                        db[j, i] = w + b[j, i]
+                    else:
+                        cb[j, i] = zero
+                        db[j, i] = zero
+                    w = b[j, i]
                 else:
+                    b[j, i] = zero
                     cb[j, i] = zero
                     db[j, i] = zero
-                w = b[j, i]
-            else:
-                b[j, i] = zero
-                cb[j, i] = zero
-                db[j, i] = zero
 
 
 def torch_natural(x, y, xs):
@@ -369,6 +371,7 @@ def torch_hermite(x, y, xs):
         return ys
 
 
+# FIXME:
 def torch_akima(x, y, xs):
     nf = y.size(-1)
     if nf <= 3:
@@ -391,7 +394,6 @@ def torch_akima(x, y, xs):
         ind2 = torch.where(torch.isnan(m2) & (~torch.isnan(m1)))
         m1[ind1] = m2[ind2[:-1] + (ind2[-1] + 1,)]
         m2[ind2] = m1[ind1[:-1] + (ind1[-1] - 1,)]
-
         f1[ind1[:-1] + (ind1[-1] - 2,)] = torch.abs(m1[..., 1:] - m1[..., :-1])[
             ind1[:-1] + (ind1[-1] - 1,)
         ]
@@ -418,4 +420,5 @@ def torch_akima(x, y, xs):
         ci = torch.take_along_dim(c, idxs, dim=-1)
         bi = torch.take_along_dim(b, idxs, dim=-1)
         t = xs - xi
-        return ((t * di + ci) * t + bi) * t + yi
+        ys = ((t * di + ci) * t + bi) * t + yi
+        return ys
