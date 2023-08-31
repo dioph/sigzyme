@@ -9,6 +9,7 @@ on:
       - master
 
 jobs:
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -20,15 +21,59 @@ jobs:
             python-version: 3.9
           - os: ubuntu-latest
             python-version: 3.8
+    defaults:
+      run:
+        shell: bash -el {0}
     steps:
-      - uses: actions/checkout@v1
+      - uses: actions/checkout@v2
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v2
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Set up Conda
+        uses: conda-incubator/setup-miniconda@v2
+        with:
+          activate-environment: sigzyme-env
+          environment-file: environment.yml
+          python-version: ${{ matrix.python-version }}
+          auto-activate-base: false
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install tox tox-gh-actions poetry
-      - name: Test with tox
-        run: tox
+          python -m pip install --upgrade pip poetry
+          poetry install
+      - name: Test with pytest
+        run: pytest tests/ --import-mode importlib --cov -vv
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v1
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip poetry
+          poetry install
+      - name: Sphinx Build
+        run: |
+          poetry run sphinx-build -E -b html docs dist/docs
+          poetry run sphinx-build -b linkcheck docs dist/docs
+
+  lint:
+    runs-on: ubuntu-latest
+      - uses: actions/checkout@v1
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip poetry isort black flake8
+          poetry install
+      - name: Format Check
+        run: |
+          isort --diff .
+          black --check .
+          flake8 . --count --ignore=E203,E266,E501,W503 --select=B,C,E,F,W,T4 --max-complexity=18 --max-line-length=88 --show-source --statistics

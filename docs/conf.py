@@ -103,7 +103,7 @@ html_sidebars = {
 }
 
 # Make sure text marked up `like this` will be interpreted as Python objects
-default_role = 'py:obj'
+default_role = "py:obj"
 
 # Example configuration for intersphinx: refer to the Python standard library.
 intersphinx_mapping = {
