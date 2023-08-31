@@ -7,7 +7,7 @@ The latest development version can be found `here <https://github.com/dioph/sigz
 
 Installation
 ============
-``sigzyme`` requires ``torch``.
+``sigzyme`` requires ``torch`` and ``numba``.
 Installing the most recent stable version of the package is as easy as::
 
     pip install sigzyme
@@ -15,7 +15,7 @@ Installing the most recent stable version of the package is as easy as::
 Changelog
 =========
 
-1.0 (2022-00-00)
+1.0 (2023-00-00)
 ----------------
 
 Initial beta release
