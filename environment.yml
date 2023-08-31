@@ -3,11 +3,7 @@ channels:
   - nvidia
   - pytorch
   - conda-forge
-  - nodefaults
 dependencies:
-  - pip
-  - pip:
-    - "poetry>=1.2"
   - pytorch::pytorch=2.0.1
   - nvidia::cudatoolkit=11.7  # [linux]
 
