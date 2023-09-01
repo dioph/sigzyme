@@ -3,6 +3,15 @@ channels:
   - nvidia
   - pytorch
   - conda-forge
+  - nodefaults
 dependencies:
+  - python=3.10.*
+  - pip
+  - pip:
+    - "poetry>=1.2"
   - pytorch::pytorch=2.0.1
-  - nvidia::cudatoolkit=11.7  # [linux]
+  - nvidia::cudatoolkit=11.7
+
+# Non-standard section listing target platforms for conda-lock:
+platforms:
+  - linux-64
